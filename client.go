@@ -306,6 +306,23 @@ func (c *TronClient) _hash(m proto.Message) ([]byte, error) {
 	return hasher.Sum(nil), nil
 }
 
+func (c *TronClient) CallContract(cctx context.Context, from, contract address.Address, data []byte) (*api.TransactionExtention, error) {
+	txx, err := _timeoutRun(cctx, c.timeout, func(ctx context.Context) (*api.TransactionExtention, error) {
+		return c.fullnodeGrpc.TriggerConstantContract(ctx, &core.TriggerSmartContract{
+			OwnerAddress:    from,
+			ContractAddress: contract,
+			CallValue:       0,
+			Data:            data,
+			CallTokenValue:  0,
+			TokenId:         0,
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return txx, nil
+}
+
 func (c *TronClient) TriggerContract(cctx context.Context, feeLimit int64,
 	fromPriv []byte, contract address.Address, data []byte) ([]byte, error) {
 	privKey, err := BytesToPrivateKey(fromPriv)
@@ -349,10 +366,17 @@ func (c *TronClient) TriggerContract(cctx context.Context, feeLimit int64,
 	if err != nil {
 		return nil, err
 	}
-	if !ret.Result || ret.Code > 0 {
-		return nil, fmt.Errorf("broadcast failed: result(%d) %s", ret.Code, string(ret.Message))
+	if err = c.ParseReturn(ret); err != nil {
+		return nil, fmt.Errorf("broadcast failed: %w", err)
 	}
 	return txId, nil
+}
+
+func (c *TronClient) ParseReturn(ret *api.Return) error {
+	if ret != nil && (!ret.Result || ret.Code > 0) {
+		return fmt.Errorf("result(%d) %s", ret.Code, string(ret.Message))
+	}
+	return nil
 }
 
 func (c *TronClient) TriggerContractResult(cctx context.Context, txId []byte) (*core.Transaction, error) {
@@ -391,19 +415,47 @@ func (c *TronClient) TryTxByHash(cctx context.Context, txId []byte) (*core.Trans
 	return nil, ErrTxNotFound
 }
 
+func (c *TronClient) ParseContractTxExResult(txx *api.TransactionExtention, runErr error) (energy int64, output []byte, err error) {
+	if runErr != nil {
+		return 0, nil, runErr
+	}
+	if txx == nil || txx.Transaction == nil {
+		return 0, nil, ErrTxNotFound
+	}
+	if err := c.ParseReturn(txx.Result); err != nil {
+		return 0, nil, err
+	}
+	if _, err := c.ContractTxResult(txx.Transaction, false); err != nil {
+		return 0, nil, err
+	}
+	if len(txx.ConstantResult) > 0 {
+		output = txx.ConstantResult[0]
+	}
+	return txx.EnergyUsed - txx.EnergyPenalty, output, nil
+}
+
 func (c *TronClient) ParseContractTxResult(tx *core.Transaction, runErr error) (fee int64, err error) {
 	if runErr != nil {
 		return 0, runErr
 	}
+	return c.ContractTxResult(tx, true)
+}
+
+func (c *TronClient) ContractTxResult(tx *core.Transaction, runOrCall bool) (fee int64, err error) {
 	if tx == nil {
 		return 0, ErrTxNotFound
 	}
 	if len(tx.Ret) == 0 || tx.Ret[0] == nil {
 		return 0, ErrTxResultNotFound
 	}
-	if tx.Ret[0].Ret == core.Transaction_Result_SUCESS && tx.Ret[0].ContractRet == core.Transaction_Result_SUCCESS {
-		return tx.Ret[0].Fee, nil
+	if runOrCall {
+		if tx.Ret[0].Ret == core.Transaction_Result_SUCESS && tx.Ret[0].ContractRet == core.Transaction_Result_SUCCESS {
+			return tx.Ret[0].Fee, nil
+		}
 	} else {
-		return 0, fmt.Errorf("Ret:%s ContractRet:%s", tx.Ret[0].Ret.String(), tx.Ret[0].ContractRet.String())
+		if tx.Ret[0].Ret == core.Transaction_Result_SUCESS && tx.Ret[0].ContractRet <= core.Transaction_Result_SUCCESS {
+			return tx.Ret[0].Fee, nil
+		}
 	}
+	return 0, fmt.Errorf("ret:%s contractRet:%s", tx.Ret[0].Ret.String(), tx.Ret[0].ContractRet.String())
 }

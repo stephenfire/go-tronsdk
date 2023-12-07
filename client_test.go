@@ -84,3 +84,26 @@ func TestGetTxResult(t *testing.T) {
 		t.Logf("fee: %d", fee)
 	}
 }
+
+func TestTriggerConstantContract(t *testing.T) {
+	client, err := NewTronClient(context.Background(), "https://api.shasta.trongrid.io", "grpc.shasta.trongrid.io:50051", "https://api.shasta.trongrid.io/jsonrpc", 10, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = client.Close()
+	}()
+
+	from, _ := hex.DecodeString("410000000000000000000000000000000000000000")
+	contract, _ := hex.DecodeString("413de9ab8f268ae3ee3cb7908db7249ba173e15c0f")
+	data, _ := hex.DecodeString("6e9960c3")
+	tx, err := client.CallContract(context.Background(), from, contract, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	energy, output, err := client.ParseContractTxExResult(tx, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("energy:%d output:%x", energy, output)
+}
