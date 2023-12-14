@@ -118,6 +118,10 @@ func (c *TronClient) Close() (err error) {
 	return
 }
 
+func (c *TronClient) ChainId() *big.Int {
+	return new(big.Int).Set(c.chainid)
+}
+
 func (c *TronClient) String() string {
 	if c == nil {
 		return "TronClient<nil>"
@@ -173,6 +177,7 @@ func (c *TronClient) WitnessPermissions(ctx context.Context, addr address.Addres
 
 const (
 	MaxCommitteeSize           = 27
+	ConfirmedSize              = 19
 	MaintenanceTimeIntervalKey = "getMaintenanceTimeInterval"
 )
 
@@ -187,17 +192,8 @@ func (c *TronClient) ListCommittees(ctx context.Context) ([]*WitnessPerm, error)
 		return nil, errors.New("no witnesses found")
 	}
 	var wps []*WitnessPerm
-	wpInterval := time.Duration(1) * time.Second
-	var lastTime time.Time
 	for i, witness := range witnesses.Witnesses {
 		if witness != nil && witness.IsJobs {
-			if len(wps) > 0 {
-				n := time.Now()
-				l := lastTime.Add(wpInterval)
-				if n.Before(l) {
-					time.Sleep(l.Sub(n))
-				}
-			}
 			if !address.Address(witness.Address).IsValid() {
 				return nil, fmt.Errorf("invalid address of (%d)witness:{Address:%x IsJobs:%t}", i, witness.Address, witness.IsJobs)
 			}
@@ -207,7 +203,6 @@ func (c *TronClient) ListCommittees(ctx context.Context) ([]*WitnessPerm, error)
 				return nil, fmt.Errorf("get permission for witness %s(%s) failed: %w", addr.Hex(), addr.String(), err)
 			}
 			wps = append(wps, wp)
-			lastTime = time.Now()
 		}
 	}
 	return wps, nil
@@ -237,6 +232,16 @@ func (c *TronClient) GetBlockHeader(cctx context.Context, num int64) (*api.Block
 		req := &api.BlockReq{
 			IdOrNum: fmt.Sprintf("%d", num),
 			Detail:  false,
+		}
+		return c.fullnodeGrpc.GetBlock(ctx, req)
+	})
+}
+
+func (c *TronClient) GetBlock(cctx context.Context, num int64) (*api.BlockExtention, error) {
+	return _timeoutRun(cctx, c.timeout, func(ctx context.Context) (*api.BlockExtention, error) {
+		req := &api.BlockReq{
+			IdOrNum: fmt.Sprintf("%d", num),
+			Detail:  true,
 		}
 		return c.fullnodeGrpc.GetBlock(ctx, req)
 	})
