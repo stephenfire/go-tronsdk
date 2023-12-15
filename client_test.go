@@ -107,3 +107,18 @@ func TestTriggerConstantContract(t *testing.T) {
 	}
 	t.Logf("energy:%d output:%x", energy, output)
 }
+
+func TestTronClient_GetMaintenanceTimeInterval(t *testing.T) {
+	client, err := NewTronClient(context.Background(), "https://api.shasta.trongrid.io", "grpc.shasta.trongrid.io:50051", "https://api.shasta.trongrid.io/jsonrpc", 10, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = client.Close()
+	}()
+	mtiTime, err := client.GetMaintenanceTimeInterval(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("%s, %dms", mtiTime, mtiTime.Milliseconds())
+}

@@ -217,7 +217,7 @@ func (c *TronClient) GetMaintenanceTimeInterval(cctx context.Context) (time.Dura
 		if chainparams != nil && len(chainparams.ChainParameter) > 0 {
 			for _, cp := range chainparams.ChainParameter {
 				if cp != nil && cp.Key == MaintenanceTimeIntervalKey {
-					return time.Duration(cp.Value), nil
+					return time.Duration(cp.Value) * time.Millisecond, nil
 				}
 			}
 		} else {
