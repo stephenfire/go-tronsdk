@@ -3,7 +3,6 @@ package go_tronsdk
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"math/big"
@@ -19,17 +18,11 @@ import (
 	"github.com/fbsobreira/gotron-sdk/pkg/proto/core"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/protobuf/proto"
 )
 
 const (
 	DefaultTimeoutSeconds       = 30
 	DefaultGetTxIntervalSeconds = 5
-)
-
-var (
-	ErrTxNotFound       = errors.New("transation not found")
-	ErrTxResultNotFound = errors.New("transaction result not found")
 )
 
 type TronClient struct {
@@ -42,7 +35,7 @@ type TronClient struct {
 	eth           *ethclient.Client
 	chainid       *big.Int
 	timeout       time.Duration
-	getTxInterval time.Duration
+	GetTxInterval time.Duration
 }
 
 func _timeoutRun[T any](ctx context.Context, d time.Duration, f func(context.Context) (T, error)) (t T, err error) {
@@ -77,7 +70,7 @@ func NewTronClient(cctx context.Context, httpurl, grpcurl, ethurl string,
 	if interval > 0 {
 		interval = getTxIntervalSeconds
 	}
-	c.getTxInterval = time.Duration(interval) * time.Second
+	c.GetTxInterval = time.Duration(interval) * time.Second
 
 	c.eth, errr = _timeoutRun(cctx, c.timeout, func(ctx context.Context) (*ethclient.Client, error) {
 		return ethclient.DialContext(ctx, ethurl)
@@ -301,14 +294,10 @@ func (c *TronClient) GetTransactionById(cctx context.Context, txHash []byte) (*c
 	})
 }
 
-func (c *TronClient) _hash(m proto.Message) ([]byte, error) {
-	bs, err := proto.Marshal(m)
-	if err != nil {
-		return nil, err
-	}
-	hasher := sha256.New()
-	hasher.Write(bs)
-	return hasher.Sum(nil), nil
+func (c *TronClient) GetTransactionInfoById(cctx context.Context, txHash []byte) (*core.TransactionInfo, error) {
+	return _timeoutRun(cctx, c.timeout, func(ctx context.Context) (*core.TransactionInfo, error) {
+		return c.fullnodeGrpc.GetTransactionInfoById(ctx, &api.BytesMessage{Value: txHash})
+	})
 }
 
 func (c *TronClient) CallContract(cctx context.Context, from, contract address.Address, data []byte) (*api.TransactionExtention, error) {
@@ -329,7 +318,7 @@ func (c *TronClient) CallContract(cctx context.Context, from, contract address.A
 }
 
 func (c *TronClient) TriggerContract(cctx context.Context, feeLimit int64,
-	fromPriv []byte, contract address.Address, data []byte) ([]byte, error) {
+	fromPriv []byte, contract address.Address, value int64, data []byte) (*api.TransactionExtention, error) {
 	privKey, err := BytesToPrivateKey(fromPriv)
 	if err != nil || privKey == nil {
 		return nil, errors.New("unknown private key")
@@ -339,7 +328,7 @@ func (c *TronClient) TriggerContract(cctx context.Context, feeLimit int64,
 	tsc := &core.TriggerSmartContract{
 		OwnerAddress:    from[:],
 		ContractAddress: contract[:],
-		CallValue:       0,
+		CallValue:       value,
 		Data:            data,
 		CallTokenValue:  0,
 		TokenId:         0,
@@ -353,7 +342,7 @@ func (c *TronClient) TriggerContract(cctx context.Context, feeLimit int64,
 	if feeLimit > 0 {
 		txx.Transaction.RawData.FeeLimit = feeLimit
 	}
-	txId, err := c._hash(txx.Transaction.RawData)
+	txId, err := HashMessage(txx.Transaction.RawData)
 	if err != nil {
 		return nil, err
 	}
@@ -369,12 +358,12 @@ func (c *TronClient) TriggerContract(cctx context.Context, feeLimit int64,
 		return c.fullnodeGrpc.BroadcastTransaction(ctx, txx.Transaction)
 	})
 	if err != nil {
-		return nil, err
+		return txx, err
 	}
-	if err = c.ParseReturn(ret); err != nil {
-		return nil, fmt.Errorf("broadcast failed: %w", err)
+	if err = (*TxReturn)(ret).Err(); err != nil {
+		return txx, fmt.Errorf("broadcast failed: %w", err)
 	}
-	return txId, nil
+	return txx, nil
 }
 
 func (c *TronClient) ParseReturn(ret *api.Return) error {
@@ -394,7 +383,7 @@ func (c *TronClient) TriggerContractResult(cctx context.Context, txId []byte) (*
 	if tx == nil {
 		return nil, nil
 	}
-	id, _ := c._hash(tx.RawData)
+	id, _ := HashMessage(tx.RawData)
 	if bytes.Equal(id, txId) {
 		return tx, nil
 	}
@@ -403,7 +392,7 @@ func (c *TronClient) TriggerContractResult(cctx context.Context, txId []byte) (*
 
 func (c *TronClient) TryTxByHash(cctx context.Context, txId []byte) (*core.Transaction, error) {
 	for i := 0; i < 5; i++ {
-		time.Sleep(c.getTxInterval)
+		time.Sleep(c.GetTxInterval)
 		select {
 		case <-cctx.Done():
 			return nil, cctx.Err()
@@ -420,47 +409,14 @@ func (c *TronClient) TryTxByHash(cctx context.Context, txId []byte) (*core.Trans
 	return nil, ErrTxNotFound
 }
 
-func (c *TronClient) ParseContractTxExResult(txx *api.TransactionExtention, runErr error) (energy int64, output []byte, err error) {
-	if runErr != nil {
-		return 0, nil, runErr
-	}
-	if txx == nil || txx.Transaction == nil {
-		return 0, nil, ErrTxNotFound
-	}
-	if err := c.ParseReturn(txx.Result); err != nil {
-		return 0, nil, err
-	}
-	if _, err := c.ContractTxResult(txx.Transaction, false); err != nil {
-		return 0, nil, err
-	}
-	if len(txx.ConstantResult) > 0 {
-		output = txx.ConstantResult[0]
-	}
-	return txx.EnergyUsed - txx.EnergyPenalty, output, nil
+func (c *TronClient) GetContract(cctx context.Context, addr []byte) (*core.SmartContract, error) {
+	return _timeoutRun(cctx, c.timeout, func(ctx context.Context) (*core.SmartContract, error) {
+		return c.fullnodeGrpc.GetContract(ctx, &api.BytesMessage{Value: addr})
+	})
 }
 
-func (c *TronClient) ParseContractTxResult(tx *core.Transaction, runErr error) (fee int64, err error) {
-	if runErr != nil {
-		return 0, runErr
-	}
-	return c.ContractTxResult(tx, true)
-}
-
-func (c *TronClient) ContractTxResult(tx *core.Transaction, runOrCall bool) (fee int64, err error) {
-	if tx == nil {
-		return 0, ErrTxNotFound
-	}
-	if len(tx.Ret) == 0 || tx.Ret[0] == nil {
-		return 0, ErrTxResultNotFound
-	}
-	if runOrCall {
-		if tx.Ret[0].Ret == core.Transaction_Result_SUCESS && tx.Ret[0].ContractRet == core.Transaction_Result_SUCCESS {
-			return tx.Ret[0].Fee, nil
-		}
-	} else {
-		if tx.Ret[0].Ret == core.Transaction_Result_SUCESS && tx.Ret[0].ContractRet <= core.Transaction_Result_SUCCESS {
-			return tx.Ret[0].Fee, nil
-		}
-	}
-	return 0, fmt.Errorf("ret:%s contractRet:%s", tx.Ret[0].Ret.String(), tx.Ret[0].ContractRet.String())
+func (c *TronClient) GetAccount(cctx context.Context, addr []byte) (*core.Account, error) {
+	return _timeoutRun(cctx, c.timeout, func(ctx context.Context) (*core.Account, error) {
+		return c.fullnodeGrpc.GetAccount(ctx, &core.Account{Address: addr})
+	})
 }
